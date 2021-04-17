@@ -1,169 +1,155 @@
-# Licensed to the Apache Software Foundation (ASF) under one
-# or more contributor license agreements.  See the NOTICE file
-# distributed with this work for additional information
-# regarding copyright ownership.  The ASF licenses this file
-# to you under the Apache License, Version 2.0 (the
-# "License"); you may not use this file except in compliance
-# with the License.  You may obtain a copy of the License at
-#
-#   http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing,
-# software distributed under the License is distributed on an
-# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-# KIND, either express or implied.  See the License for the
-# specific language governing permissions and limitations
-# under the License.
-
-################################
-## Airflow Webserver Deployment
-#################################
-kind: Deployment
+{{- $extraPipPackages := concat .Values.airflow.extraPipPackages .Values.web.extraPipPackages }}
 apiVersion: apps/v1
+kind: Deployment
 metadata:
-  name: {{ .Release.Name }}-webserver
+  name: {{ include "airflow.fullname" . }}-web
+  {{- if .Values.web.annotations }}
+  annotations:
+    {{- toYaml .Values.web.annotations | nindent 4 }}
+  {{- end }}
   labels:
-    tier: airflow
-    component: webserver
+    app: {{ include "airflow.labels.app" . }}
+    component: web
+    chart: {{ include "airflow.labels.chart" . }}
     release: {{ .Release.Name }}
-    chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
     heritage: {{ .Release.Service }}
-{{- with .Values.labels }}
-{{ toYaml . | indent 4 }}
-{{- end }}
+    {{- if .Values.web.labels }}
+    {{- toYaml .Values.web.labels | nindent 4 }}
+    {{- end }}
 spec:
-  replicas: {{ .Values.webserver.replicas }}
+  replicas: {{ .Values.web.replicas }}
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      maxUnavailable: 1
+      ## multiple web pods can safely run concurrently
+      maxSurge: 25%
+      maxUnavailable: 0
   selector:
     matchLabels:
-      tier: airflow
-      component: webserver
+      app: {{ include "airflow.labels.app" . }}
+      component: web
       release: {{ .Release.Name }}
   template:
     metadata:
-      labels:
-        tier: airflow
-        component: webserver
-        release: {{ .Release.Name }}
-{{- with .Values.labels }}
-{{ toYaml . | indent 8 }}
-{{- end }}
       annotations:
-        checksum/metadata-secret: {{ include (print $.Template.BasePath "/secrets/metadata-connection-secret.yaml") . | sha256sum }}
-        checksum/pgbouncer-config-secret: {{ include (print $.Template.BasePath "/secrets/pgbouncer-config-secret.yaml") . | sha256sum }}
-        checksum/airflow-config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
-        {{- if .Values.airflowPodAnnotations }}
-        {{- toYaml .Values.airflowPodAnnotations | nindent 8 }}
+        checksum/secret-config: {{ include (print $.Template.BasePath "/config/secret-config.yaml") . | sha256sum }}
+        checksum/config-webserver-config: {{ include (print $.Template.BasePath "/config/secret-webserver-config.yaml") . | sha256sum }}
+        {{- if .Values.airflow.podAnnotations }}
+        {{- toYaml .Values.airflow.podAnnotations | nindent 8 }}
+        {{- end }}
+        {{- if .Values.web.podAnnotations }}
+        {{- toYaml .Values.web.podAnnotations | nindent 8 }}
+        {{- end }}
+        {{- if .Values.web.safeToEvict }}
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "true"
+        {{- end }}
+      labels:
+        app: {{ include "airflow.labels.app" . }}
+        component: web
+        release: {{ .Release.Name }}
+        {{- if .Values.web.podLabels }}
+        {{- toYaml .Values.web.podLabels | nindent 8 }}
         {{- end }}
     spec:
-      nodeSelector:
-{{ toYaml .Values.nodeSelector | indent 8 }}
-      affinity:
-{{ toYaml .Values.affinity | indent 8 }}
-      tolerations:
-{{ toYaml .Values.tolerations | indent 8 }}
       restartPolicy: Always
-      serviceAccountName: {{ .Release.Name }}-webserver-serviceaccount
-      securityContext:
-        runAsUser: {{ .Values.uid }}
-        fsGroup: {{ .Values.gid }}
-      {{- if or .Values.registry.secretName .Values.registry.connection }}
+      {{- if .Values.airflow.image.pullSecret }}
       imagePullSecrets:
-        - name: {{ template "registry_secret" . }}
+        - name: {{ .Values.airflow.image.pullSecret }}
+      {{- end }}
+      {{- if .Values.web.nodeSelector }}
+      nodeSelector:
+        {{- toYaml .Values.web.nodeSelector | nindent 8 }}
+      {{- end }}
+      {{- if .Values.web.affinity }}
+      affinity:
+        {{- toYaml .Values.web.affinity | nindent 8 }}
+      {{- end }}
+      {{- if .Values.web.tolerations }}
+      tolerations:
+        {{- toYaml .Values.web.tolerations | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "airflow.serviceAccountName" . }}
+      {{- if .Values.web.securityContext }}
+      securityContext:
+        {{- toYaml .Values.web.securityContext | nindent 8 }}
       {{- end }}
       initContainers:
-        - name: wait-for-airflow-migrations
-          image: {{ template "airflow_image" . }}
-          imagePullPolicy: {{ .Values.images.airflow.pullPolicy }}
-          args:
-          {{- include "wait-for-migrations-command" . | indent 10 }}
-          env:
-          {{- include "custom_airflow_environment" . | indent 10 }}
-          {{- include "standard_airflow_environment" . | indent 10 }}
+        {{- if $extraPipPackages }}
+        {{- include "airflow.init_container.install_pip_packages" (dict "Release" .Release "Values" .Values "extraPipPackages" $extraPipPackages) | indent 8 }}
+        {{- end }}
+        {{- include "airflow.init_container.check_db" . | indent 8 }}
+        {{- include "airflow.init_container.wait_for_db_migrations" . | indent 8 }}
       containers:
-{{- if and (.Values.dags.gitSync.enabled) (not .Values.dags.persistence.enabled) }}
-{{- include "git_sync_container" . | indent 8 }}
-{{- end }}
-        - name: webserver
-          image: {{ template "airflow_image" . }}
-          imagePullPolicy: {{ .Values.images.airflow.pullPolicy }}
-          args: ["webserver"]
+        - name: airflow-web
+          {{- include "airflow.image" . | indent 10 }}
           resources:
-{{ toYaml .Values.webserver.resources | indent 12 }}
+            {{- toYaml .Values.web.resources | nindent 12 }}
+          ports:
+            - name: web
+              containerPort: 8080
+              protocol: TCP
+          envFrom:
+            {{- include "airflow.envFrom" . | indent 12 }}
+          env:
+            {{- if $extraPipPackages }}
+            - name: PYTHONPATH
+              value: /opt/python/site-packages
+            {{- end }}
+            {{- include "airflow.env" . | indent 12 }}
+          command:
+            - "/usr/bin/dumb-init"
+            - "--"
+          args:
+            - "bash"
+            - "-c"
+            - "exec airflow webserver"
+          {{- if .Values.web.livenessProbe.enabled }}
+          livenessProbe:
+            initialDelaySeconds: {{ .Values.web.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.web.livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.web.livenessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.web.livenessProbe.failureThreshold }}
+            httpGet:
+              scheme: {{ include "airflow.web.scheme" . }}
+              {{- $airflowUrl := .Values.airflow.config.AIRFLOW__WEBSERVER__BASE_URL | default "" | printf "%s/health" | urlParse }}
+              path: {{ get $airflowUrl "path" }}
+              port: web
+          {{- end }}
+          {{- if .Values.web.readinessProbe.enabled }}
+          readinessProbe:
+            initialDelaySeconds: {{ .Values.web.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.web.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.web.readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.web.readinessProbe.failureThreshold }}
+            httpGet:
+              scheme: {{ include "airflow.web.scheme" . }}
+              {{- $airflowUrl := .Values.airflow.config.AIRFLOW__WEBSERVER__BASE_URL | default "" | printf "%s/health" | urlParse }}
+              path: {{ get $airflowUrl "path" }}
+              port: web
+          {{- end }}
+          {{- $extraVolumeMounts := .Values.web.extraVolumeMounts }}
+          {{- $volumeMounts := include "airflow.volumeMounts" (dict "Release" .Release "Values" .Values "extraPipPackages" $extraPipPackages "extraVolumeMounts" $extraVolumeMounts) }}
           volumeMounts:
-            - name: config
-              mountPath: {{ template "airflow_config_path" . }}
-              subPath: airflow.cfg
-              readOnly: true
-{{- if .Values.webserver.webserverConfig }}
-            - name: config
-              mountPath: {{ template "airflow_webserver_config_path" . }}
+            {{- $volumeMounts | indent 12 }}
+            - name: webserver-config
+              mountPath: /opt/airflow/webserver_config.py
               subPath: webserver_config.py
               readOnly: true
-{{- end }}
-{{- if .Values.scheduler.airflowLocalSettings }}
-            - name: config
-              mountPath: {{ template "airflow_local_setting_path" . }}
-              subPath: airflow_local_settings.py
-              readOnly: true
-{{- end }}
-{{- if or .Values.dags.gitSync.enabled .Values.dags.persistence.enabled }}
-            - name: dags
-              mountPath: {{ template "airflow_dags_mount_path" . }}
-{{- end }}
-{{- if .Values.webserver.extraVolumeMounts }}
-{{ toYaml .Values.webserver.extraVolumeMounts | indent 12 }}
-{{- end }}
-          ports:
-            - name: webserver-ui
-              containerPort: {{ .Values.ports.airflowUI }}
-          livenessProbe:
-            httpGet:
-{{- if .Values.ingress.enabled }}
-              path: {{ printf "/%s/health" .Values.ingress.web.path }}
-{{- else }}
-              path: /health
-{{- end }}
-              port: {{ .Values.ports.airflowUI }}
-              scheme: {{ .Values.webserver.livenessProbe.scheme }}
-            initialDelaySeconds: {{ .Values.webserver.livenessProbe.initialDelaySeconds | default 15 }}
-            timeoutSeconds: {{ .Values.webserver.livenessProbe.timeoutSeconds | default 30 }}
-            failureThreshold: {{ .Values.webserver.livenessProbe.failureThreshold | default 20 }}
-            periodSeconds: {{ .Values.webserver.livenessProbe.periodSeconds | default 5 }}
-          readinessProbe:
-            httpGet:
-{{- if .Values.ingress.enabled }}
-              path: {{ printf "/%s/health" .Values.ingress.web.path }}
-{{- else }}
-              path: /health
-{{- end }}
-              port: {{ .Values.ports.airflowUI }}
-              scheme: {{ .Values.webserver.readinessProbe.scheme }}
-            initialDelaySeconds: {{ .Values.webserver.readinessProbe.initialDelaySeconds | default 15 }}
-            timeoutSeconds: {{ .Values.webserver.readinessProbe.timeoutSeconds | default 30 }}
-            failureThreshold: {{ .Values.webserver.readinessProbe.failureThreshold | default 20 }}
-            periodSeconds: {{ .Values.webserver.readinessProbe.periodSeconds | default 5 }}
-          env:
-          {{- include "custom_airflow_environment" . | indent 10 }}
-          {{- include "standard_airflow_environment" . | indent 10 }}
+        {{- if .Values.dags.gitSync.enabled }}
+        {{- include "airflow.container.git_sync" . | indent 8 }}
+        {{- end }}
+        {{- if .Values.airflow.extraContainers }}
+        {{- toYaml .Values.airflow.extraContainers | nindent 8 }}
+        {{- end }}
+      {{- $extraVolumes := .Values.web.extraVolumes }}
+      {{- $volumes := include "airflow.volumes" (dict "Release" .Release "Values" .Values "extraPipPackages" $extraPipPackages "extraVolumes" $extraVolumes) }}
       volumes:
-        - name: config
-          configMap:
-            name: {{ template "airflow_config" . }}
-        {{- if .Values.dags.persistence.enabled }}
-        - name: dags
-          persistentVolumeClaim:
-            claimName: {{ template "airflow_dags_volume_claim" . }}
-        {{- else if .Values.dags.gitSync.enabled }}
-        - name: dags
-          emptyDir: {}
-        {{- if  .Values.dags.gitSync.sshKeySecret }}
-        {{- include "git_sync_ssh_key_volume" . | indent 8 }}
-        {{- end }}
-        {{- end }}
-{{- if .Values.webserver.extraVolumes }}
-{{ toYaml .Values.webserver.extraVolumes | indent 8 }}
-{{- end }}
+        {{- $volumes | indent 8 }}
+        - name: webserver-config
+          secret:
+            {{- if .Values.web.webserverConfig.existingSecret }}
+            secretName: {{ .Values.web.webserverConfig.existingSecret }}
+            {{- else }}
+            secretName: {{ include "airflow.fullname" . }}-webserver-config
+            {{- end }}
+            defaultMode: 0644
